@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Channel Point Entry Overlay</title>
+  <style>
+    html {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      background: transparent !important;
+      background-color: transparent !important;
+    }
+
+    body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: transparent !important;
+      background-color: transparent !important;
+      font-family: "Segoe UI","Yu Gothic UI","Meiryo",sans-serif;
+    }
+
+    :root {
+      --bg: rgba(255, 223, 235, 0.94);
+      --border: rgba(255, 132, 195, 0.86);
+      --text: #5f3146;
+      --accent: #ff69b4;
+      --shadow: rgba(127, 74, 98, 0.22);
+    }
+
+    .stage {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+      background: transparent !important;
+      background-color: transparent !important;
+    }
+
+    .entry {
+      min-width: 620px;
+      max-width: 900px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 14px 18px;
+      border-radius: 20px;
+      border: 2px solid var(--border);
+      background: var(--bg);
+      box-shadow: 0 12px 30px var(--shadow), 0 0 16px rgba(255,105,180,0.14);
+      transform: translateY(16px) scale(0.97);
+      opacity: 0;
+      transition: opacity 220ms ease, transform 220ms ease;
+      backdrop-filter: blur(10px);
+    }
+
+    .entry.is-visible {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+
+    .icon-wrap {
+      flex: 0 0 auto;
+      width: 88px;
+      height: 88px;
+      border-radius: 9999px;
+      overflow: hidden;
+      border: 3px solid rgba(255,255,255,0.96);
+      box-shadow: 0 6px 18px rgba(0,0,0,0.18), 0 0 12px rgba(255,105,180,0.22);
+      background: rgba(255,255,255,0.28);
+    }
+
+    .icon-wrap img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+
+    .body {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .eyebrow {
+      font-size: 16px;
+      font-weight: 800;
+      letter-spacing: 0.10em;
+      color: var(--accent);
+      text-shadow: 0 2px 8px rgba(255,255,255,0.35);
+    }
+
+    .message {
+      font-size: 34px;
+      line-height: 1.15;
+      font-weight: 900;
+      color: var(--text);
+      text-shadow: 0 2px 10px rgba(255,255,255,0.30);
+      word-break: keep-all;
+      white-space: nowrap;
+    }
+
+    .reward {
+      min-height: 1em;
+      font-size: 16px;
+      font-weight: 700;
+      color: rgba(95,49,70,0.76);
+      text-shadow: 0 1px 6px rgba(255,255,255,0.24);
+    }
+  </style>
+</head>
+<body>
+  <div class="stage">
+    <div id="entry" class="entry">
+      <div class="icon-wrap">
+        <img id="icon" alt="icon">
+      </div>
+      <div class="body">
+        <div class="eyebrow">MATCH ENTRY</div>
+        <div id="message" class="message"></div>
+        <div id="reward" class="reward"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const RAW_BASE = "https://script.google.com/macros/s/AKfycbxJj5TWunfdCf_Vm7TR8Js50SY2JlsqpglEyPG3RAglYpAT-pHO4l-_SoGoj8t9n9Q_/exec?view=entry_overlay&raw=1";
+    const REFRESH_MS = 1000;
+    const DISPLAY_MS = 10000;
+    const JSONP_CALLBACK_NAME = "__cpEntryOverlayCallback";
+
+    const entryEl = document.getElementById("entry");
+    const iconEl = document.getElementById("icon");
+    const messageEl = document.getElementById("message");
+    const rewardEl = document.getElementById("reward");
+
+    let bootstrapDone = false;
+    let currentEntry = null;
+    let currentHideTimer = null;
+    let currentNextTimer = null;
+    let nextRefreshTimer = null;
+    let refreshBusy = false;
+
+    const pendingQueue = [];
+    const seenIdSet = new Set();
+    const seenIdOrder = [];
+
+    function forceTransparentBackground() {
+      document.documentElement.style.background = "transparent";
+      document.documentElement.style.backgroundColor = "transparent";
+      document.documentElement.style.setProperty("background", "transparent", "important");
+      document.documentElement.style.setProperty("background-color", "transparent", "important");
+
+      document.body.style.background = "transparent";
+      document.body.style.backgroundColor = "transparent";
+      document.body.style.setProperty("background", "transparent", "important");
+      document.body.style.setProperty("background-color", "transparent", "important");
+    }
+
+    function clearNextRefreshTimer() {
+      if (nextRefreshTimer) {
+        window.clearTimeout(nextRefreshTimer);
+        nextRefreshTimer = null;
+      }
+    }
+
+    function scheduleNextRefresh(delayMs) {
+      clearNextRefreshTimer();
+      nextRefreshTimer = window.setTimeout(requestState, delayMs);
+    }
+
+    function addSeenId(redemptionId) {
+      if (!redemptionId || seenIdSet.has(redemptionId)) {
+        return;
+      }
+
+      seenIdSet.add(redemptionId);
+      seenIdOrder.push(redemptionId);
+
+      while (seenIdOrder.length > 500) {
+        const removed = seenIdOrder.shift();
+        seenIdSet.delete(removed);
+      }
+    }
+
+    function isQueued(redemptionId) {
+      return pendingQueue.some(function(item) {
+        return item && item.redemptionId === redemptionId;
+      });
+    }
+
+    function enqueueEntry(item) {
+      if (!item || !item.redemptionId) {
+        return;
+      }
+      if (seenIdSet.has(item.redemptionId)) {
+        return;
+      }
+      if (currentEntry && currentEntry.redemptionId === item.redemptionId) {
+        return;
+      }
+      if (isQueued(item.redemptionId)) {
+        return;
+      }
+
+      pendingQueue.push(item);
+    }
+
+    function applyEntryToDom(item) {
+      iconEl.src = item.iconUrl || "";
+      messageEl.textContent = item.messageText || "";
+      rewardEl.textContent = "";
+    }
+
+    function clearEntryTimers() {
+      if (currentHideTimer) {
+        clearTimeout(currentHideTimer);
+        currentHideTimer = null;
+      }
+      if (currentNextTimer) {
+        clearTimeout(currentNextTimer);
+        currentNextTimer = null;
+      }
+    }
+
+    function hideEntry() {
+      entryEl.classList.remove("is-visible");
+    }
+
+    function showNextFromQueue() {
+      if (currentEntry) {
+        return;
+      }
+      if (pendingQueue.length === 0) {
+        return;
+      }
+
+      const nextItem = pendingQueue.shift();
+      currentEntry = nextItem;
+      addSeenId(nextItem.redemptionId);
+      applyEntryToDom(nextItem);
+
+      void entryEl.offsetWidth;
+      entryEl.classList.add("is-visible");
+
+      clearEntryTimers();
+
+      currentHideTimer = window.setTimeout(function() {
+        hideEntry();
+
+        currentNextTimer = window.setTimeout(function() {
+          currentEntry = null;
+          currentHideTimer = null;
+          currentNextTimer = null;
+          showNextFromQueue();
+        }, 260);
+      }, DISPLAY_MS);
+    }
+
+    function bootstrapQueue(data) {
+      const activeEntry = data && data.activeEntry ? data.activeEntry : null;
+      const queueItems = Array.isArray(data && data.queueItems) ? data.queueItems : [];
+
+      queueItems.forEach(function(item) {
+        if (!item || !item.redemptionId) {
+          return;
+        }
+        if (activeEntry && activeEntry.isActive && item.redemptionId === activeEntry.redemptionId) {
+          return;
+        }
+        addSeenId(item.redemptionId);
+      });
+
+      if (activeEntry && activeEntry.isActive && activeEntry.redemptionId) {
+        enqueueEntry({
+          redemptionId: activeEntry.redemptionId,
+          rewardId: activeEntry.rewardId,
+          rewardTitle: activeEntry.rewardTitle,
+          userId: activeEntry.userId,
+          userLogin: activeEntry.userLogin,
+          displayName: activeEntry.displayName,
+          messageText: activeEntry.messageText,
+          iconUrl: activeEntry.iconUrl,
+          profileImageUrl: activeEntry.profileImageUrl,
+          rewardImageUrl: activeEntry.rewardImageUrl,
+          receivedAt: activeEntry.updatedAt,
+          receivedAtMs: activeEntry.updatedAtMs || 0
+        });
+
+        showNextFromQueue();
+      }
+
+      bootstrapDone = true;
+    }
+
+    function mergeServerData(data) {
+      if (!bootstrapDone) {
+        bootstrapQueue(data);
+        return;
+      }
+
+      const queueItems = Array.isArray(data && data.queueItems) ? data.queueItems : [];
+      queueItems.forEach(function(item) {
+        enqueueEntry(item);
+      });
+
+      const activeEntry = data && data.activeEntry ? data.activeEntry : null;
+      if (activeEntry && activeEntry.isActive && activeEntry.redemptionId) {
+        enqueueEntry({
+          redemptionId: activeEntry.redemptionId,
+          rewardId: activeEntry.rewardId,
+          rewardTitle: activeEntry.rewardTitle,
+          userId: activeEntry.userId,
+          userLogin: activeEntry.userLogin,
+          displayName: activeEntry.displayName,
+          messageText: activeEntry.messageText,
+          iconUrl: activeEntry.iconUrl,
+          profileImageUrl: activeEntry.profileImageUrl,
+          rewardImageUrl: activeEntry.rewardImageUrl,
+          receivedAt: activeEntry.updatedAt,
+          receivedAtMs: activeEntry.updatedAtMs || 0
+        });
+      }
+
+      showNextFromQueue();
+    }
+
+    window[JSONP_CALLBACK_NAME] = function(json) {
+      try {
+        mergeServerData(json);
+      } catch (error) {
+        console.error(error);
+      }
+    };
+
+    function requestState() {
+      if (refreshBusy) {
+        scheduleNextRefresh(REFRESH_MS);
+        return;
+      }
+
+      refreshBusy = true;
+      forceTransparentBackground();
+
+      const script = document.createElement("script");
+      const src = RAW_BASE
+        + "&callback=" + encodeURIComponent(JSONP_CALLBACK_NAME)
+        + "&_ts=" + Date.now();
+
+      let cleaned = false;
+      const timeoutId = window.setTimeout(function() {
+        console.error("JSONP timeout");
+        cleanup();
+      }, 10000);
+
+      function cleanup() {
+        if (cleaned) {
+          return;
+        }
+        cleaned = true;
+
+        window.clearTimeout(timeoutId);
+
+        if (script.parentNode) {
+          script.parentNode.removeChild(script);
+        }
+
+        refreshBusy = false;
+        scheduleNextRefresh(REFRESH_MS);
+      }
+
+      script.src = src;
+      script.async = true;
+
+      script.onload = function() {
+        cleanup();
+      };
+
+      script.onerror = function(error) {
+        console.error(error);
+        cleanup();
+      };
+
+      document.head.appendChild(script);
+    }
+
+    window.addEventListener("pageshow", function() {
+      scheduleNextRefresh(0);
+    });
+
+    document.addEventListener("visibilitychange", function() {
+      if (!document.hidden) {
+        scheduleNextRefresh(0);
+      }
+    });
+
+    forceTransparentBackground();
+    requestState();
+  </script>
+</body>
+</html>
